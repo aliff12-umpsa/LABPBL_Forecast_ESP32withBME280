@@ -1,0 +1,199 @@
+/*************************************************************
+ *  FORECAST GENERATOR (Clean & Well-Commented Version)
+ *
+ *  Input Sheet  : "Sheet1"
+ *  Columns      : Timestamp + 4 Sensors
+ *  Output Sheet : "Forecasts"
+ *
+ *  Forecast Method:
+ *  - Simple Moving Average (SMA)
+ *  - Small controlled random variation
+ *  - Confidence bounds (±1%)
+ *************************************************************/
+function generateForecasts() {
+
+  // Get active spreadsheet
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+
+  // ===================== CONFIGURATION =====================
+  const INPUT_SHEET  = "Sheet1";
+  const OUTPUT_SHEET = "Forecasts";
+  const HOURS_AHEAD  = 24;              // Forecast next 24 hours
+  const PRESSURE_HPA_TO_ATM = 1 / 1013.25; // Convert hPa to atm
+
+  // ===================== INPUT HEADERS =====================
+  const inputHeaders = [
+    "Timestamp",
+    "Distance (cm)",
+    "Temperature (°C)",
+    "Humidity (%)",
+    "Pressure (hPa)"
+  ];
+
+  // ===================== OUTPUT HEADERS =====================
+  const outputHeaders = [
+    "Timestamp",
+    "Distance Forecast (cm)", "Distance Upper (cm)", "Distance Lower (cm)",
+    "Temperature Forecast (°C)", "Temperature Upper (°C)", "Temperature Lower (°C)",
+    "Humidity Forecast (%)", "Humidity Upper (%)", "Humidity Lower (%)",
+    "Pressure Forecast (atm)", "Pressure Upper (atm)", "Pressure Lower (atm)"
+  ];
+
+  // Create sheets if they do not exist
+  const inputSheet    = getOrCreateSheet(ss, INPUT_SHEET, inputHeaders);
+  const forecastSheet = getOrCreateSheet(ss, OUTPUT_SHEET, outputHeaders);
+
+  // ===================== DATA VALIDATION =====================
+  const lastRow = inputSheet.getLastRow();
+  if (lastRow < 3) {
+    throw new Error("Not enough data to generate forecasts (minimum 3 rows required).");
+  }
+
+  // Read all sensor data (rows 2 to last row)
+  const data = inputSheet.getRange(2, 1, lastRow - 1, 5).getValues();
+
+  // Extract timestamps
+  const timestamps = data.map(r => r[0]);
+
+  // Extract sensor values and clean them
+  const sensors = {
+    Distance:    data.map(r => parseNumber(r[1])),
+    Temperature:data.map(r => parseNumber(r[2])),
+    Humidity:   data.map(r => parseNumber(r[3])),
+    Pressure:   data.map(r => parseNumber(r[4]) * PRESSURE_HPA_TO_ATM)
+  };
+
+  // Ensure each sensor has at least 3 valid readings
+  Object.entries(sensors).forEach(([name, values]) => {
+    if (values.filter(v => !isNaN(v)).length < 3) {
+      throw new Error(`Add at least 3 valid ${name} readings.`);
+    }
+  });
+
+  // ===================== FORECAST GENERATION =====================
+  const forecasts = {
+    Distance:    forecast(sensors.Distance, timestamps, HOURS_AHEAD),
+    Temperature: forecast(sensors.Temperature, timestamps, HOURS_AHEAD),
+    Humidity:    forecast(sensors.Humidity, timestamps, HOURS_AHEAD),
+    Pressure:    forecast(sensors.Pressure, timestamps, HOURS_AHEAD)
+  };
+
+  // Clear old forecast results
+  clearSheetContent(forecastSheet, outputHeaders.length);
+
+  // ===================== WRITE FORECAST DATA =====================
+  const output = [];
+  for (let i = 0; i < HOURS_AHEAD; i++) {
+    output.push([
+      forecasts.Distance[i].timestamp,
+
+      forecasts.Distance[i].value,    forecasts.Distance[i].upper,    forecasts.Distance[i].lower,
+      forecasts.Temperature[i].value, forecasts.Temperature[i].upper, forecasts.Temperature[i].lower,
+      forecasts.Humidity[i].value,    forecasts.Humidity[i].upper,    forecasts.Humidity[i].lower,
+      forecasts.Pressure[i].value,    forecasts.Pressure[i].upper,    forecasts.Pressure[i].lower
+    ]);
+  }
+
+  // Write all rows at once (efficient)
+  forecastSheet.getRange(2, 1, output.length, outputHeaders.length)
+               .setValues(output);
+
+  SpreadsheetApp.getUi().alert("Forecasts generated successfully!");
+}
+
+/*************************************************************
+ *  FORECAST FUNCTION
+ *  Method:
+ *  - Simple Moving Average (last 6 values)
+ *  - Small random variation
+ *  - ±1% confidence bounds
+ *************************************************************/
+function forecast(values, timestamps, hoursAhead) {
+
+  // Pair values with timestamps and remove invalid data
+  const validData = values
+    .map((v, i) => ({ value: v, timestamp: timestamps[i] }))
+    .filter(d => !isNaN(d.value) && d.timestamp instanceof Date);
+
+  if (validData.length < 3) {
+    throw new Error("Not enough valid data for forecasting.");
+  }
+
+  // Calculate SMA using last 6 readings (or fewer if unavailable)
+  const smaWindow = Math.min(6, validData.length);
+  const sma = average(validData.slice(-smaWindow).map(d => d.value));
+
+  const lastTime = validData[validData.length - 1].timestamp;
+  const results = [];
+
+  // Generate future timestamps and forecast values
+  for (let i = 1; i <= hoursAhead; i++) {
+    const nextTime = new Date(lastTime.getTime() + i * 3600000);
+
+    // Add controlled random variation
+    const variation = randomVariation(sma);
+    const value = sma + variation;
+
+    results.push({
+      timestamp: nextTime,
+      value: round3(value),
+      upper: round3(value * 1.01),
+      lower: round3(value * 0.99)
+    });
+  }
+
+  return results;
+}
+
+/*************************************************************
+ *  HELPER FUNCTIONS
+ *************************************************************/
+
+// Create sheet if it does not exist
+function getOrCreateSheet(ss, name, headers) {
+  let sheet = ss.getSheetByName(name);
+  if (!sheet) {
+    sheet = ss.insertSheet(name);
+    sheet.appendRow(headers);
+  }
+  return sheet;
+}
+
+// Clear previous forecast content
+function clearSheetContent(sheet, columnCount) {
+  const lastRow = sheet.getLastRow();
+  if (lastRow > 1) {
+    sheet.getRange(2, 1, lastRow - 1, columnCount).clearContent();
+  }
+}
+
+// Parse numeric values safely
+function parseNumber(val) {
+  if (val === null || val === "") return NaN;
+  return parseFloat(String(val).replace(",", "."));
+}
+
+// Calculate average
+function average(arr) {
+  return arr.reduce((a, b) => a + b, 0) / arr.length;
+}
+
+// Round to 3 decimal places
+function round3(num) {
+  return Math.round(num * 1000) / 1000;
+}
+
+// Generate small variation scaled to value size
+function randomVariation(base) {
+  return (Math.random() - 0.5) * Math.max(base * 0.005, 0.01);
+}
+
+/*************************************************************
+ *  CUSTOM MENU
+ *************************************************************/
+function onOpen() {
+  SpreadsheetApp.getUi()
+    .createMenu("Sensor Tools")
+    .addItem("Generate Forecasts", "generateForecasts")
+    .addToUi();
+}
